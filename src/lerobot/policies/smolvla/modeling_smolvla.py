@@ -58,6 +58,7 @@ from collections import deque
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
+from transformers import AutoProcessor
 
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
@@ -233,6 +234,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         config.validate_features()
         self.config = config
 
+        self.language_tokenizer = AutoProcessor.from_pretrained(self.config.vlm_model_name).tokenizer
         self.model = VLAFlowMatching(config)
         self.reset()
 
@@ -257,8 +259,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         images, img_masks = self.prepare_images(batch)
         state = self.prepare_state(batch)
-        lang_tokens = batch[f"{OBS_LANGUAGE_TOKENS}"]
-        lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
+        lang_tokens, lang_masks = self.prepare_language(batch)
 
         actions = self.model.sample_actions(images, img_masks, lang_tokens, lang_masks, state, noise=noise)
 
@@ -310,6 +311,30 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         return self._queues[ACTION].popleft()
 
+    def prepare_language(self, batch) -> tuple[Tensor, Tensor]:
+        """Tokenize the text input"""
+        device = batch[OBS_STATE].device
+        tasks = batch["task"]
+        if isinstance(tasks, str):
+            tasks = [tasks]
+
+        if len(tasks) == 1:
+            tasks = [tasks[0] for _ in range(batch[OBS_STATE].shape[0])]
+
+        tasks = [task if task.endswith("\n") else f"{task}\n" for task in tasks]
+
+        tokenized_prompt = self.language_tokenizer.__call__(
+            tasks,
+            padding=self.config.pad_language_to,
+            padding_side="right",
+            max_length=self.config.tokenizer_max_length,
+            return_tensors="pt",
+        )
+        lang_tokens = tokenized_prompt["input_ids"].to(device=device)
+        lang_masks = tokenized_prompt["attention_mask"].to(device=device, dtype=torch.bool)
+
+        return lang_tokens, lang_masks
+
     def forward(self, batch: dict[str, Tensor], noise=None, time=None) -> dict[str, Tensor]:
         """Do a full training forward pass to compute the loss"""
         if self.config.adapt_to_pi_aloha:
@@ -318,8 +343,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         images, img_masks = self.prepare_images(batch)
         state = self.prepare_state(batch)
-        lang_tokens = batch[f"{OBS_LANGUAGE_TOKENS}"]
-        lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
+        lang_tokens, lang_masks = self.prepare_language(batch)
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
