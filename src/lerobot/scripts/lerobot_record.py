@@ -97,6 +97,7 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     so100_follower,
     so101_follower,
+    so101_mujoco,
 )
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
@@ -109,6 +110,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so101_leader,
 )
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
+from lerobot.teleoperators.keyboard.teleop_so101_keyboard import SO101KeyboardTeleop  # noqa: F401
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
@@ -260,7 +262,7 @@ def record_loop(
 
     teleop_arm = teleop_keyboard = None
     if isinstance(teleop, list):
-        teleop_keyboard = next((t for t in teleop if isinstance(t, KeyboardTeleop)), None)
+        teleop_keyboard = next((t for t in teleop if isinstance(t, (KeyboardTeleop, SO101KeyboardTeleop))), None)
         teleop_arm = next(
             (
                 t
@@ -323,6 +325,10 @@ def record_loop(
         elif policy is None and isinstance(teleop, Teleoperator):
             act = teleop.get_action()
 
+            # For SO101KeyboardTeleop with SO101MujocoRobot, convert keyboard state to base action
+            if isinstance(teleop, SO101KeyboardTeleop) and hasattr(robot, '_from_keyboard_to_base_action'):
+                act = robot._from_keyboard_to_base_action(act)
+
             # Applies a pipeline to the raw teleop action, default is IdentityProcessor
             act_processed_teleop = teleop_action_processor((act, obs))
 
@@ -354,6 +360,11 @@ def record_loop(
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         _sent_action = robot.send_action(robot_action_to_send)
+
+        # For simulation robots (MuJoCo), use the returned action from send_action (final joint positions)
+        # instead of the teleop output (velocity commands)
+        if _sent_action is not None and hasattr(robot, '_glfw_window'):  # MuJoCo simulation robot
+            action_values = _sent_action
 
         # Write to dataset
         if dataset is not None:

@@ -17,9 +17,11 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from lerobot.cameras import CameraConfig
 from lerobot.robots.config import RobotConfig
 
 
+@RobotConfig.register_subclass("so101_mujoco")
 @dataclass
 class SO101MujocoConfig(RobotConfig):
     """Configuration for SO-101 in MuJoCo simulation.

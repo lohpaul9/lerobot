@@ -28,7 +28,7 @@ from typing import Any
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from ..teleoperator import Teleoperator
-from .configuration_keyboard import KeyboardTeleopConfig
+from .configuration_keyboard import SO101KeyboardTeleopConfig
 
 PYNPUT_AVAILABLE = True
 try:
@@ -50,19 +50,19 @@ class SO101KeyboardTeleop(Teleoperator):
     """
     Keyboard teleop for SO-101 that returns raw key states.
 
-    Returns a dict with boolean values for each key:
+    Returns a dict with boolean values for each key (WASD controls to avoid arrow key conflicts):
     {
-        "up": bool, "down": bool, "left": bool, "right": bool,
-        "shift": bool, "shift_r": bool, "ctrl": bool, "alt": bool,
-        "[": bool, "]": bool, ",": bool, ".": bool,
-        "z": bool, "x": bool,  # Alternative wrist roll controls
+        "w": bool, "a": bool, "s": bool, "d": bool,  # Movement
+        "q": bool, "e": bool,  # Wrist roll
+        "r": bool, "f": bool,  # Gripper
+        "shift": bool, "ctrl": bool,  # Up/down
     }
     """
 
     name = "so101_keyboard"
-    config_class = KeyboardTeleopConfig
+    config_class = SO101KeyboardTeleopConfig
 
-    def __init__(self, config: KeyboardTeleopConfig):
+    def __init__(self, config: SO101KeyboardTeleopConfig):
         super().__init__(config)
         self.config = config
         self.robot_type = config.type
@@ -83,7 +83,9 @@ class SO101KeyboardTeleop(Teleoperator):
 
     @property
     def is_connected(self) -> bool:
-        return PYNPUT_AVAILABLE and isinstance(self.listener, keyboard.Listener) and self.listener.is_alive()
+        # Consider connected if listener was created, even if thread isn't alive
+        # (macOS accessibility issues can cause thread to die but we can still function)
+        return PYNPUT_AVAILABLE and isinstance(self.listener, keyboard.Listener)
 
     @property
     def is_calibrated(self) -> bool:
@@ -115,23 +117,11 @@ class SO101KeyboardTeleop(Teleoperator):
     def _on_press(self, key):
         # Map special keys
         key_name = None
-        if key == keyboard.Key.up:
-            key_name = "up"
-        elif key == keyboard.Key.down:
-            key_name = "down"
-        elif key == keyboard.Key.left:
-            key_name = "left"
-        elif key == keyboard.Key.right:
-            key_name = "right"
-        elif key == keyboard.Key.shift or key == keyboard.Key.shift_l:
+        if key == keyboard.Key.shift or key == keyboard.Key.shift_l:
             key_name = "shift"
-        elif key == keyboard.Key.shift_r:
-            key_name = "shift_r"
         elif key == keyboard.Key.ctrl or key == keyboard.Key.ctrl_l:
             key_name = "ctrl"
-        elif key == keyboard.Key.alt or key == keyboard.Key.alt_l:
-            key_name = "alt"
-        elif hasattr(key, "char") and key.char in ["[", "]", ",", ".", "z", "x"]:
+        elif hasattr(key, "char") and key.char in ["w", "a", "s", "d", "q", "e", "r", "f"]:
             key_name = key.char
 
         if key_name:
@@ -140,28 +130,13 @@ class SO101KeyboardTeleop(Teleoperator):
     def _on_release(self, key):
         # Map special keys
         key_name = None
-        if key == keyboard.Key.up:
-            key_name = "up"
-        elif key == keyboard.Key.down:
-            key_name = "down"
-        elif key == keyboard.Key.left:
-            key_name = "left"
-        elif key == keyboard.Key.right:
-            key_name = "right"
-        elif key == keyboard.Key.shift or key == keyboard.Key.shift_l:
+        if key == keyboard.Key.shift or key == keyboard.Key.shift_l:
             key_name = "shift"
-        elif key == keyboard.Key.shift_r:
-            key_name = "shift_r"
         elif key == keyboard.Key.ctrl or key == keyboard.Key.ctrl_l:
             key_name = "ctrl"
-        elif key == keyboard.Key.alt or key == keyboard.Key.alt_l:
-            key_name = "alt"
-        elif hasattr(key, "char") and key.char in ["[", "]", ",", ".", "z", "x"]:
+        elif hasattr(key, "char") and key.char in ["w", "a", "s", "d", "q", "e", "r", "f"]:
             key_name = key.char
-        elif key == keyboard.Key.esc:
-            logging.info("ESC pressed, disconnecting.")
-            self.disconnect()
-            return
+        # Note: ESC handling removed - lerobot_record has its own keyboard listener for that
 
         if key_name:
             self.event_queue.put((key_name, False))
@@ -177,11 +152,11 @@ class SO101KeyboardTeleop(Teleoperator):
         Get current keyboard state.
 
         Returns:
-            Dict with boolean values for each key:
+            Dict with boolean values for each key (WASD controls):
             {
-                "up": bool, "down": bool, "left": bool, "right": bool,
-                "shift": bool, "shift_r": bool, "ctrl": bool, "alt": bool,
-                "[": bool, "]": bool,
+                "w": bool, "a": bool, "s": bool, "d": bool,
+                "q": bool, "e": bool, "r": bool, "f": bool,
+                "shift": bool, "ctrl": bool,
             }
         """
         if not self.is_connected:
@@ -193,20 +168,16 @@ class SO101KeyboardTeleop(Teleoperator):
 
         # Return current state of all keys we care about
         return {
-            "up": self.current_pressed.get("up", False),
-            "down": self.current_pressed.get("down", False),
-            "left": self.current_pressed.get("left", False),
-            "right": self.current_pressed.get("right", False),
+            "w": self.current_pressed.get("w", False),
+            "a": self.current_pressed.get("a", False),
+            "s": self.current_pressed.get("s", False),
+            "d": self.current_pressed.get("d", False),
+            "q": self.current_pressed.get("q", False),
+            "e": self.current_pressed.get("e", False),
+            "r": self.current_pressed.get("r", False),
+            "f": self.current_pressed.get("f", False),
             "shift": self.current_pressed.get("shift", False),
-            "shift_r": self.current_pressed.get("shift_r", False),
             "ctrl": self.current_pressed.get("ctrl", False),
-            "alt": self.current_pressed.get("alt", False),
-            "[": self.current_pressed.get("[", False),
-            "]": self.current_pressed.get("]", False),
-            ",": self.current_pressed.get(",", False),
-            ".": self.current_pressed.get(".", False),
-            "z": self.current_pressed.get("z", False),
-            "x": self.current_pressed.get("x", False),
         }
 
     def send_feedback(self, feedback: dict[str, Any]) -> None:

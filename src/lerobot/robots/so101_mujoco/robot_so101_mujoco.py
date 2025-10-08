@@ -32,7 +32,9 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+import glfw
 import mujoco as mj
+import mujoco.viewer
 import numpy as np
 
 from lerobot.robots.robot import Robot
@@ -61,6 +63,14 @@ class SO101MujocoRobot(Robot):
         self.model: mj.MjModel | None = None
         self.data: mj.MjData | None = None
         self._renderer: mj.Renderer | None = None
+        self._viewer = None  # GLFW viewer window
+
+        # GLFW rendering (like test_with_teleop.py)
+        self._glfw_window = None
+        self._glfw_cam = None
+        self._glfw_opt = None
+        self._glfw_scene = None
+        self._glfw_ctx = None
 
         # Joint/actuator/site IDs (set in connect())
         self.dof_ids: dict[str, int] = {}
@@ -87,6 +97,10 @@ class SO101MujocoRobot(Robot):
         self.physics_dt = 1.0 / config.physics_fps
         self.n_physics_per_control = int(self.control_dt / self.physics_dt)
         self.n_control_per_record = int((1.0 / config.record_fps) / self.control_dt)
+
+        # Camera tracking (we render MuJoCo camera directly, not using LeRobot camera abstraction)
+        # This dict just tracks that we have one camera for lerobot_record
+        self.cameras = {"camera_front": None}
 
         logger.info(
             f"SO101MujocoRobot initialized: "
@@ -174,7 +188,24 @@ class SO101MujocoRobot(Robot):
         # Find and set home position
         self._initialize_home_position()
 
+        # Initialize GLFW rendering (like test_with_teleop.py)
+        self._init_glfw_rendering()
+
         logger.info(f"{self} connected successfully")
+
+    def launch_viewer(self) -> None:
+        """Launch the MuJoCo GLFW viewer window."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError("Robot must be connected before launching viewer")
+
+        if self._viewer is not None:
+            logger.warning("Viewer already launched")
+            return
+
+        self._viewer = mujoco.viewer.launch_passive(self.model, self.data)
+        # Initial sync to make viewer responsive
+        self._viewer.sync()
+        logger.info("MuJoCo viewer window opened")
 
     def _setup_ids(self):
         """Map joint, actuator, and site names to MuJoCo IDs."""
@@ -226,6 +257,71 @@ class SO101MujocoRobot(Robot):
         ee_pos = self.data.site_xpos[self.ee_site_id]
         logger.info(f"Home position initialized: {robot_q}")
         logger.info(f"Home EE position: [{ee_pos[0]:.3f}, {ee_pos[1]:.3f}, {ee_pos[2]:.3f}]")
+
+    def _init_glfw_rendering(self):
+        """Initialize GLFW window and rendering context (like test_with_teleop.py)."""
+        # Keep offscreen renderer for camera images - it has a separate OpenGL context
+
+        if not glfw.init():
+            logger.warning("GLFW init failed - running without visualization")
+            return
+
+        # Create window
+        window_width, window_height = 1280, 720
+        self._glfw_window = glfw.create_window(
+            window_width, window_height,
+            "SO-101 MuJoCo Recording",
+            None, None
+        )
+        if not self._glfw_window:
+            glfw.terminate()
+            logger.warning("Failed to create GLFW window - running without visualization")
+            return
+
+        # Set up MuJoCo rendering structures
+        self._glfw_cam = mj.MjvCamera()
+        self._glfw_opt = mj.MjvOption()
+        mj.mjv_defaultCamera(self._glfw_cam)
+        self._glfw_cam.distance = 1.3
+        self._glfw_cam.azimuth = 140
+        self._glfw_cam.elevation = -20
+
+        self._glfw_scene = mj.MjvScene(self.model, maxgeom=10000)
+
+        # Need context current to create MjrContext, then release it
+        glfw.make_context_current(self._glfw_window)
+        glfw.swap_interval(1)  # Enable vsync
+        self._glfw_ctx = mj.MjrContext(self.model, mj.mjtFontScale.mjFONTSCALE_150)
+        glfw.make_context_current(None)  # Release context to avoid conflicts
+
+        logger.info("GLFW visualization window created")
+
+    def _render_glfw(self):
+        """Render to GLFW window (like test_with_teleop.py)."""
+        if self._glfw_window is None:
+            return
+
+        # Check if window should close
+        if glfw.window_should_close(self._glfw_window):
+            return
+
+        # Make GLFW context current for rendering
+        glfw.make_context_current(self._glfw_window)
+        glfw.swap_interval(1)  # Enable vsync
+
+        # Render scene
+        viewport_width, viewport_height = glfw.get_framebuffer_size(self._glfw_window)
+        viewport = mj.MjrRect(0, 0, viewport_width, viewport_height)
+        mj.mjv_updateScene(
+            self.model, self.data, self._glfw_opt, None, self._glfw_cam,
+            mj.mjtCatBit.mjCAT_ALL, self._glfw_scene
+        )
+        mj.mjr_render(viewport, self._glfw_scene, self._glfw_ctx)
+        glfw.swap_buffers(self._glfw_window)
+        glfw.poll_events()
+
+        # Release context to avoid conflicts with offscreen renderer
+        glfw.make_context_current(None)
 
     @property
     def is_calibrated(self) -> bool:
@@ -287,32 +383,32 @@ class SO101MujocoRobot(Robot):
     def _from_keyboard_to_base_action(self, keyboard_action: dict) -> dict:
         """Convert keyboard input to velocity commands (stored for send_action).
 
-        Matches orient_down.py controls:
-        - Arrow Up/Down: +X / -X (world frame)
-        - Arrow Left/Right: -Y / +Y (world frame, left is -Y)
-        - Shift / Shift+R: +Z / -Z
-        - [ / ] or Z / X: Wrist roll left/right (Z/X avoids MuJoCo viewer conflicts)
-        - , / .: Gripper open/close
+        Matches orient_down.py controls (using WASD to avoid conflicts with lerobot arrow keys):
+        - W/S: +X / -X (world frame, forward/backward)
+        - A/D: +Y / -Y (world frame, left/right)
+        - Shift / Ctrl: +Z / -Z (up/down)
+        - Q / E: Wrist roll left/right
+        - R / F: Gripper open/close
         """
-        vx = self.config.lin_speed if keyboard_action.get("up") else 0.0
-        vx -= self.config.lin_speed if keyboard_action.get("down") else 0.0
+        vx = self.config.lin_speed if keyboard_action.get("w") else 0.0
+        vx -= self.config.lin_speed if keyboard_action.get("s") else 0.0
 
-        # Left = -Y, Right = +Y (to match orient_down A=+Y, D=-Y where A is left)
-        vy = -self.config.lin_speed if keyboard_action.get("left") else 0.0
-        vy += self.config.lin_speed if keyboard_action.get("right") else 0.0
+        # A = +Y (left), D = -Y (right) to match orient_down
+        vy = self.config.lin_speed if keyboard_action.get("a") else 0.0
+        vy -= self.config.lin_speed if keyboard_action.get("d") else 0.0
 
         vz = self.config.lin_speed if keyboard_action.get("shift") else 0.0
-        vz -= self.config.lin_speed if keyboard_action.get("shift_r") else 0.0
+        vz -= self.config.lin_speed if keyboard_action.get("ctrl") else 0.0
 
-        # [ / ] or Z / X for wrist roll (matches orient_down, Z/X avoids MuJoCo viewer conflicts)
-        yaw_rate = -self.config.yaw_speed if (keyboard_action.get("[") or keyboard_action.get("z")) else 0.0
-        yaw_rate += self.config.yaw_speed if (keyboard_action.get("]") or keyboard_action.get("x")) else 0.0
+        # Q / E for wrist roll
+        yaw_rate = -self.config.yaw_speed if keyboard_action.get("q") else 0.0
+        yaw_rate += self.config.yaw_speed if keyboard_action.get("e") else 0.0
 
-        # , / . for gripper (matches orient_down)
-        gripper_delta = -self.config.grip_speed if keyboard_action.get(",") else 0.0
-        gripper_delta += self.config.grip_speed if keyboard_action.get(".") else 0.0
+        # R / F for gripper
+        gripper_delta = self.config.grip_speed if keyboard_action.get("r") else 0.0
+        gripper_delta -= self.config.grip_speed if keyboard_action.get("f") else 0.0
 
-        # Store for send_action to use
+        # Store for backward compatibility with test scripts
         self._keyboard_velocities = {
             "vx": vx,
             "vy": vy,
@@ -321,27 +417,42 @@ class SO101MujocoRobot(Robot):
             "gripper_delta": gripper_delta,
         }
 
-        # Return empty dict (actual action computed in send_action)
-        return {}
+        # Return velocity dict for lerobot_record
+        return self._keyboard_velocities.copy()
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         """
-        Execute keyboard velocity commands for 1/30s using high-frequency control.
+        Execute velocity commands for 1/30s using high-frequency control.
+
+        Action dict should contain velocity keys: 'vx', 'vy', 'vz', 'yaw_rate', 'gripper_delta'
+        (These are set by _from_keyboard_to_base_action or can be provided directly)
 
         Returns the final joint position targets (for recording).
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected")
 
-        # Get velocity commands from keyboard
-        vel = self._keyboard_velocities
-        vx, vy, vz = vel["vx"], vel["vy"], vel["vz"]
-        yaw_rate = vel["yaw_rate"]
-        gripper_delta = vel["gripper_delta"]
+        # Get velocity commands from action dict (set by _from_keyboard_to_base_action)
+        # If action is empty, use stored keyboard velocities (backward compatibility with test scripts)
+        if action:
+            vx = action.get("vx", 0.0)
+            vy = action.get("vy", 0.0)
+            vz = action.get("vz", 0.0)
+            yaw_rate = action.get("yaw_rate", 0.0)
+            gripper_delta = action.get("gripper_delta", 0.0)
+        else:
+            # Fallback to stored velocities for test scripts
+            vel = self._keyboard_velocities
+            vx, vy, vz = vel["vx"], vel["vy"], vel["vz"]
+            yaw_rate = vel["yaw_rate"]
+            gripper_delta = vel["gripper_delta"]
 
         # Run high-frequency control loop (orient_down.py logic)
         for _ in range(self.n_control_per_record):
             self._control_step(vx, vy, vz, yaw_rate, gripper_delta)
+
+        # Render GLFW visualization once per action (30Hz) instead of per control step (180Hz)
+        self._render_glfw()
 
         # Return final target positions (what we commanded)
         action_to_record = {}
@@ -500,6 +611,24 @@ class SO101MujocoRobot(Robot):
         """Close MuJoCo model and renderer."""
         if not self.is_connected:
             return
+
+        # Close GLFW window
+        if self._glfw_window is not None:
+            glfw.terminate()
+            self._glfw_window = None
+            self._glfw_cam = None
+            self._glfw_opt = None
+            self._glfw_scene = None
+            self._glfw_ctx = None
+
+        # Close viewer
+        if self._viewer is not None:
+            try:
+                self._viewer.close()
+            except Exception as e:
+                logger.warning(f"Error closing viewer: {e}")
+            finally:
+                self._viewer = None
 
         if self._renderer is not None:
             try:
