@@ -230,19 +230,19 @@ class SO101MujocoRobot(Robot):
         """
         Set a good home position with tool pointing down.
 
-        Using manually tuned values that give:
-        - EE position: [0.200, -0.031, 0.199] (20cm forward, 20cm high, nearly centered)
+        With new robot orientation (base at X=0.2, pointing in +Y direction):
+        - EE positioned in forward workspace (+Y direction)
         - Tool pointing downward with good alignment
         - Good Jacobian conditioning for manipulation
         """
-        # Set joint angles to tested good configuration
+        # Set joint angles to home configuration
         q_home = self.data.qpos.copy()
-        q_home[self.dof_ids["shoulder_pan"]] = 0.079
-        q_home[self.dof_ids["shoulder_lift"]] = -0.222
-        q_home[self.dof_ids["elbow_flex"]] = 0.515
-        q_home[self.dof_ids["wrist_flex"]] = 1.281
-        q_home[self.dof_ids["wrist_roll"]] = 0.003
-        q_home[self.dof_ids["gripper"]] = 0.002
+        q_home[self.dof_ids["shoulder_pan"]] = 0.0
+        q_home[self.dof_ids["shoulder_lift"]] = -0.3
+        q_home[self.dof_ids["elbow_flex"]] = 0.6
+        q_home[self.dof_ids["wrist_flex"]] = 1.2
+        q_home[self.dof_ids["wrist_roll"]] = 0.0
+        q_home[self.dof_ids["gripper"]] = 0.8
 
         # Set initial state
         self.data.qpos[:] = q_home
@@ -269,13 +269,17 @@ class SO101MujocoRobot(Robot):
             logger.warning("GLFW init failed - running without visualization")
             return
 
-        # Create window
+        # Create window - don't steal keyboard focus
         window_width, window_height = 1280, 720
+        glfw.window_hint(glfw.FOCUSED, glfw.FALSE)  # Don't steal focus on creation
+        glfw.window_hint(glfw.FOCUS_ON_SHOW, glfw.FALSE)  # Don't steal focus when shown
         self._glfw_window = glfw.create_window(
             window_width, window_height,
             "SO-101 MuJoCo Recording",
             None, None
         )
+        # Reset hints to default
+        glfw.default_window_hints()
         if not self._glfw_window:
             glfw.terminate()
             logger.warning("Failed to create GLFW window - running without visualization")
@@ -300,7 +304,7 @@ class SO101MujocoRobot(Robot):
         logger.info("GLFW visualization window created")
 
     def _render_glfw(self):
-        """Render to GLFW window (like test_with_teleop.py)."""
+        """Render camera views to GLFW window in a grid layout."""
         if self._glfw_window is None:
             return
 
@@ -312,14 +316,46 @@ class SO101MujocoRobot(Robot):
         glfw.make_context_current(self._glfw_window)
         glfw.swap_interval(1)  # Enable vsync
 
-        # Render scene
+        # Get window dimensions
         viewport_width, viewport_height = glfw.get_framebuffer_size(self._glfw_window)
-        viewport = mj.MjrRect(0, 0, viewport_width, viewport_height)
-        mj.mjv_updateScene(
-            self.model, self.data, self._glfw_opt, None, self._glfw_cam,
-            mj.mjtCatBit.mjCAT_ALL, self._glfw_scene
-        )
-        mj.mjr_render(viewport, self._glfw_scene, self._glfw_ctx)
+
+        # Layout: 2x2 grid for 3 cameras (top-left: top, top-right: front, bottom-left: wrist)
+        cam_width = viewport_width // 2
+        cam_height = viewport_height // 2
+
+        # Render each camera to its grid position
+        camera_positions = {
+            "top": (0, cam_height),           # Top-left
+            "front": (cam_width, cam_height), # Top-right
+            "wrist": (0, 0)                   # Bottom-left
+        }
+
+        for cam_name in self.config.camera_names:
+            if cam_name not in camera_positions:
+                continue
+
+            x, y = camera_positions[cam_name]
+            viewport = mj.MjrRect(x, y, cam_width, cam_height)
+
+            # Update scene with this camera
+            mj.mjv_updateScene(
+                self.model, self.data, self._glfw_opt, None, self._glfw_cam,
+                mj.mjtCatBit.mjCAT_ALL, self._glfw_scene
+            )
+
+            # Override camera to use the named camera
+            cam_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_CAMERA, cam_name)
+            if cam_id >= 0:
+                self._glfw_cam.type = mj.mjtCamera.mjCAMERA_FIXED
+                self._glfw_cam.fixedcamid = cam_id
+                mj.mjv_updateScene(
+                    self.model, self.data, self._glfw_opt, None, self._glfw_cam,
+                    mj.mjtCatBit.mjCAT_ALL, self._glfw_scene
+                )
+
+            # Render this camera view
+            mj.mjr_render(viewport, self._glfw_scene, self._glfw_ctx)
+
         glfw.swap_buffers(self._glfw_window)
         glfw.poll_events()
 
@@ -387,30 +423,32 @@ class SO101MujocoRobot(Robot):
     def _from_keyboard_to_base_action(self, keyboard_action: dict) -> dict:
         """Convert keyboard input to velocity commands (stored for send_action).
 
-        Matches orient_down.py controls (using WASD to avoid conflicts with lerobot arrow keys):
-        - W/S: +X / -X (world frame, forward/backward)
-        - A/D: +Y / -Y (world frame, left/right)
-        - Shift / Ctrl: +Z / -Z (up/down)
-        - Q / E: Wrist roll left/right
-        - R / F: Gripper open/close
+        Controls:
+        - W/S: +Y / -Y (world frame, forward/backward)
+        - A/D: -X / +X (world frame, left/right)
+        - Q/E: +Z / -Z (up/down)
+        - [ / ]: Wrist roll left/right
+        - O / C: Gripper open/close
         """
-        vx = self.config.lin_speed if keyboard_action.get("w") else 0.0
-        vx -= self.config.lin_speed if keyboard_action.get("s") else 0.0
+        # W/S for Y direction (forward/backward)
+        vy = self.config.lin_speed if keyboard_action.get("w") else 0.0
+        vy -= self.config.lin_speed if keyboard_action.get("s") else 0.0
 
-        # A = +Y (left), D = -Y (right) to match orient_down
-        vy = self.config.lin_speed if keyboard_action.get("a") else 0.0
-        vy -= self.config.lin_speed if keyboard_action.get("d") else 0.0
+        # A/D for X direction (left/right)
+        vx = -self.config.lin_speed if keyboard_action.get("a") else 0.0
+        vx += self.config.lin_speed if keyboard_action.get("d") else 0.0
 
-        vz = self.config.lin_speed if keyboard_action.get("shift") else 0.0
-        vz -= self.config.lin_speed if keyboard_action.get("ctrl") else 0.0
+        # Q/E for Z direction (up/down)
+        vz = self.config.lin_speed if keyboard_action.get("q") else 0.0
+        vz -= self.config.lin_speed if keyboard_action.get("e") else 0.0
 
-        # Q / E for wrist roll
-        yaw_rate = -self.config.yaw_speed if keyboard_action.get("q") else 0.0
-        yaw_rate += self.config.yaw_speed if keyboard_action.get("e") else 0.0
+        # [ / ] for wrist roll
+        yaw_rate = -self.config.yaw_speed if keyboard_action.get("[") else 0.0
+        yaw_rate += self.config.yaw_speed if keyboard_action.get("]") else 0.0
 
-        # R / F for gripper
-        gripper_delta = self.config.grip_speed if keyboard_action.get("r") else 0.0
-        gripper_delta -= self.config.grip_speed if keyboard_action.get("f") else 0.0
+        # O / C for gripper
+        gripper_delta = self.config.grip_speed if keyboard_action.get("o") else 0.0
+        gripper_delta -= self.config.grip_speed if keyboard_action.get("c") else 0.0
 
         # Store for backward compatibility with test scripts
         self._keyboard_velocities = {
@@ -615,18 +653,25 @@ class SO101MujocoRobot(Robot):
         """
         Reset robot arm to home position at the start of each episode.
 
+        With new robot orientation (base at X=0.2, pointing in +Y direction):
+        - Home position points end-effector forward (+Y) and slightly up
+        - Gripper open and ready for manipulation
+        - Good reach into workspace ahead
+
         This ensures consistent starting conditions for each recorded episode.
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected")
 
         # Set joint positions to home configuration
-        self.data.qpos[self.dof_ids["shoulder_pan"]] = 0.079
-        self.data.qpos[self.dof_ids["shoulder_lift"]] = -0.222
-        self.data.qpos[self.dof_ids["elbow_flex"]] = 0.515
-        self.data.qpos[self.dof_ids["wrist_flex"]] = 1.281
-        self.data.qpos[self.dof_ids["wrist_roll"]] = 0.003
-        self.data.qpos[self.dof_ids["gripper"]] = 0.002
+        # Note: These values are relative to the robot's LOCAL frame, which is now
+        # rotated 90° CCW in the world frame
+        self.data.qpos[self.dof_ids["shoulder_pan"]] = 0.0    # Centered
+        self.data.qpos[self.dof_ids["shoulder_lift"]] = -0.3  # Arm slightly forward
+        self.data.qpos[self.dof_ids["elbow_flex"]] = 0.6      # Elbow bent
+        self.data.qpos[self.dof_ids["wrist_flex"]] = 1.2      # Wrist down
+        self.data.qpos[self.dof_ids["wrist_roll"]] = 0.0      # Aligned
+        self.data.qpos[self.dof_ids["gripper"]] = 0.8         # Open
 
         # Reset velocities to zero
         self.data.qvel[self.dof_ids["shoulder_pan"]] = 0.0
@@ -652,14 +697,18 @@ class SO101MujocoRobot(Robot):
         ee_pos = self.data.site_xpos[self.ee_site_id]
         logger.info(f"Robot reset to home position - EE at: [{ee_pos[0]:.3f}, {ee_pos[1]:.3f}, {ee_pos[2]:.3f}]")
 
-    def reset_block_position(self, x_range: tuple[float, float] = (0.18, 0.26),
-                            y_range: tuple[float, float] = (-0.08, 0.08)) -> None:
+    def reset_block_position(self, x_range: tuple[float, float] = (0.0, 0.4),
+                            y_range: tuple[float, float] = (0.0, 0.3)) -> None:
         """
         Randomize block position within specified ranges.
 
+        With new robot orientation (robot base at X=0.2, pointing in +Y direction):
+        - X range: ±0.2m from robot centerline (robot is at X=0.2)
+        - Y range: forward workspace from base edge to 30cm forward
+
         Args:
-            x_range: (min_x, max_x) in meters, default (0.18, 0.26) - reachable workspace
-            y_range: (min_y, max_y) in meters, default (-0.08, 0.08) - left/right of center
+            x_range: (min_x, max_x) in meters, default (0.0, 0.4) - ±0.2m left/right of robot
+            y_range: (min_y, max_y) in meters, default (0.0, 0.3) - forward workspace
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected")

@@ -121,7 +121,7 @@ class SO101KeyboardTeleop(Teleoperator):
             key_name = "shift"
         elif key == keyboard.Key.ctrl or key == keyboard.Key.ctrl_l:
             key_name = "ctrl"
-        elif hasattr(key, "char") and key.char in ["w", "a", "s", "d", "q", "e", "r", "f"]:
+        elif hasattr(key, "char") and key.char in ["w", "a", "s", "d", "q", "e", "r", "f", "[", "]", "o", "c"]:
             key_name = key.char
 
         if key_name:
@@ -134,7 +134,7 @@ class SO101KeyboardTeleop(Teleoperator):
             key_name = "shift"
         elif key == keyboard.Key.ctrl or key == keyboard.Key.ctrl_l:
             key_name = "ctrl"
-        elif hasattr(key, "char") and key.char in ["w", "a", "s", "d", "q", "e", "r", "f"]:
+        elif hasattr(key, "char") and key.char in ["w", "a", "s", "d", "q", "e", "r", "f", "[", "]", "o", "c"]:
             key_name = key.char
         # Note: ESC handling removed - lerobot_record has its own keyboard listener for that
 
@@ -176,6 +176,10 @@ class SO101KeyboardTeleop(Teleoperator):
             "e": self.current_pressed.get("e", False),
             "r": self.current_pressed.get("r", False),
             "f": self.current_pressed.get("f", False),
+            "[": self.current_pressed.get("[", False),
+            "]": self.current_pressed.get("]", False),
+            "o": self.current_pressed.get("o", False),
+            "c": self.current_pressed.get("c", False),
             "shift": self.current_pressed.get("shift", False),
             "ctrl": self.current_pressed.get("ctrl", False),
         }

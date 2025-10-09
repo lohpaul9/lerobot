@@ -43,9 +43,9 @@ class SO101MujocoConfig(RobotConfig):
     physics_fps: int = 360     # MuJoCo physics frequency (2 × 180)
 
     # Camera configuration
-    camera_width: int = 480
+    camera_width: int = 640
     camera_height: int = 480
-    camera_names: list[str] = field(default_factory=lambda: ["front_top", "wrist"])  # Multiple cameras
+    camera_names: list[str] = field(default_factory=lambda: ["top", "front", "wrist"])  # Multiple cameras
     show_collision_geometry: bool = False  # Show collision geometry (convex hulls) in camera renders
 
     # Control parameters (from orient_down.py)
