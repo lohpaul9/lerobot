@@ -4,7 +4,7 @@ LeRobot-compatible implementation of the SO-101 robot in MuJoCo simulation.
 
 ## Overview
 
-This robot class implements the control logic from `orient_down.py` adapted for LeRobot's recording interface. It enables behavior cloning data collection in simulation with the same control quality as the original teleop script.
+This robot class enables behavior cloning data collection in simulation with the same control quality as the original teleop script.
 
 ## Key Features
 

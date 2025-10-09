@@ -599,16 +599,7 @@ def control_loop(
 
     dataset = None
     if cfg.mode == "record":
-        # Get action features from teleop_device or environment
-        if teleop_device is not None:
-            action_features = teleop_device.action_features
-        else:
-            # For gym_hil environments, infer from action space
-            action_features = {
-                "dtype": "float32",
-                "shape": env.action_space.shape,
-                "names": None,
-            }
+        action_features = teleop_device.action_features
         features = {
             ACTION: action_features,
             REWARD: {"dtype": "float32", "shape": (1,), "names": None},
@@ -675,17 +666,10 @@ def control_loop(
                 for k, v in transition[TransitionKey.OBSERVATION].items()
                 if isinstance(v, torch.Tensor)
             }
-            # For gym_hil, the actual executed action is in info["action_intervention"]
-            # For real robot, it's in complementary_data["teleop_action"]
-            info = transition[TransitionKey.INFO]
-            if "action_intervention" in info:
-                # gym_hil case: use the action from InputsControlWrapper
-                action_to_record = torch.from_numpy(info["action_intervention"]).float()
-            else:
-                # Real robot case: use teleop_action from AddTeleopActionAsComplimentaryDataStep
-                action_to_record = transition[TransitionKey.COMPLEMENTARY_DATA].get(
-                    "teleop_action", transition[TransitionKey.ACTION]
-                )
+            # Use teleop_action if available, otherwise use the action from the transition
+            action_to_record = transition[TransitionKey.COMPLEMENTARY_DATA].get(
+                "teleop_action", transition[TransitionKey.ACTION]
+            )
             frame = {
                 **observations,
                 ACTION: action_to_record.cpu(),
