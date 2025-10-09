@@ -379,8 +379,6 @@ class SO101MujocoRobot(Robot):
 
         # Update scene
         renderer.update_scene(self.data, camera=camera_name)
-
-        # Render
         pixels = renderer.render()
 
         # Convert to uint8 RGB
@@ -612,6 +610,47 @@ class SO101MujocoRobot(Robot):
             dq[wf_dof] += lim_scale * dq_wf
 
         return dq
+
+    def reset_to_home_position(self) -> None:
+        """
+        Reset robot arm to home position at the start of each episode.
+
+        This ensures consistent starting conditions for each recorded episode.
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected")
+
+        # Set joint positions to home configuration
+        self.data.qpos[self.dof_ids["shoulder_pan"]] = 0.079
+        self.data.qpos[self.dof_ids["shoulder_lift"]] = -0.222
+        self.data.qpos[self.dof_ids["elbow_flex"]] = 0.515
+        self.data.qpos[self.dof_ids["wrist_flex"]] = 1.281
+        self.data.qpos[self.dof_ids["wrist_roll"]] = 0.003
+        self.data.qpos[self.dof_ids["gripper"]] = 0.002
+
+        # Reset velocities to zero
+        self.data.qvel[self.dof_ids["shoulder_pan"]] = 0.0
+        self.data.qvel[self.dof_ids["shoulder_lift"]] = 0.0
+        self.data.qvel[self.dof_ids["elbow_flex"]] = 0.0
+        self.data.qvel[self.dof_ids["wrist_flex"]] = 0.0
+        self.data.qvel[self.dof_ids["wrist_roll"]] = 0.0
+        self.data.qvel[self.dof_ids["gripper"]] = 0.0
+
+        # Update q_des to match
+        self.q_des = self.data.qpos.copy()
+
+        # Set actuator targets
+        for joint_name in self.JOINT_NAMES:
+            self.data.ctrl[self.act_ids[joint_name]] = self.q_des[self.dof_ids[joint_name]]
+
+        # Reset filtered velocity to zero
+        self.dq_filt = np.zeros(self.model.nv)
+
+        # Forward kinematics to update derived quantities
+        mj.mj_forward(self.model, self.data)
+
+        ee_pos = self.data.site_xpos[self.ee_site_id]
+        logger.info(f"Robot reset to home position - EE at: [{ee_pos[0]:.3f}, {ee_pos[1]:.3f}, {ee_pos[2]:.3f}]")
 
     def reset_block_position(self, x_range: tuple[float, float] = (0.18, 0.26),
                             y_range: tuple[float, float] = (-0.08, 0.08)) -> None:

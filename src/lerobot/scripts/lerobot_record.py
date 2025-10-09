@@ -460,6 +460,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     with VideoEncodingManager(dataset):
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+            # Reset robot to home position at the start of each episode (SO-101 MuJoCo)
+            if hasattr(robot, 'reset_to_home_position'):
+                robot.reset_to_home_position()
+
             # Randomize block position at the start of each episode for SO-101 MuJoCo robot
             block_initial_pos = None
             if hasattr(robot, 'reset_block_position'):
