@@ -43,9 +43,9 @@ class SO101MujocoConfig(RobotConfig):
     physics_fps: int = 360     # MuJoCo physics frequency (2 × 180)
 
     # Camera configuration
-    camera_width: int = 128
-    camera_height: int = 128
-    camera_name: str = "front"
+    camera_width: int = 480
+    camera_height: int = 480
+    camera_names: list[str] = field(default_factory=lambda: ["front_top", "wrist"])  # Multiple cameras
 
     # Control parameters (from orient_down.py)
     lin_speed: float = 0.04         # Linear velocity for XYZ control (m/s)

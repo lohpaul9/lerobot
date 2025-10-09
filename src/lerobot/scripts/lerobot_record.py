@@ -460,6 +460,14 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     with VideoEncodingManager(dataset):
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+            # Randomize block position at the start of each episode for SO-101 MuJoCo robot
+            block_initial_pos = None
+            if hasattr(robot, 'reset_block_position'):
+                robot.reset_block_position()
+                # Get and store block position for episode metadata
+                if hasattr(robot, 'get_block_position'):
+                    block_initial_pos = robot.get_block_position()
+
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
             record_loop(
                 robot=robot,
@@ -484,6 +492,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
             ):
                 log_say("Reset the environment", cfg.play_sounds)
+
+                # Randomize block position for SO-101 MuJoCo robot
+                if hasattr(robot, 'reset_block_position'):
+                    robot.reset_block_position()
+
                 record_loop(
                     robot=robot,
                     events=events,
@@ -503,6 +516,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 events["exit_early"] = False
                 dataset.clear_episode_buffer()
                 continue
+
+            # TODO: Store block position as episode-level metadata
+            # For now, block position is logged but not saved to dataset
+            # if block_initial_pos is not None:
+            #     logger.info(f"Block position: [{block_initial_pos[0]:.3f}, {block_initial_pos[1]:.3f}, {block_initial_pos[2]:.3f}]")
 
             dataset.save_episode()
             recorded_episodes += 1

@@ -62,7 +62,7 @@ class SO101MujocoRobot(Robot):
         # MuJoCo model and data (initially None until connect())
         self.model: mj.MjModel | None = None
         self.data: mj.MjData | None = None
-        self._renderer: mj.Renderer | None = None
+        self._renderers: dict[str, mj.Renderer] = {}  # One renderer per camera
         self._viewer = None  # GLFW viewer window
 
         # GLFW rendering (like test_with_teleop.py)
@@ -98,9 +98,9 @@ class SO101MujocoRobot(Robot):
         self.n_physics_per_control = int(self.control_dt / self.physics_dt)
         self.n_control_per_record = int((1.0 / config.record_fps) / self.control_dt)
 
-        # Camera tracking (we render MuJoCo camera directly, not using LeRobot camera abstraction)
-        # This dict just tracks that we have one camera for lerobot_record
-        self.cameras = {"camera_front": None}
+        # Camera tracking (we render MuJoCo cameras directly, not using LeRobot camera abstraction)
+        # This dict just tracks cameras for lerobot_record
+        self.cameras = {f"camera_{name}": None for name in config.camera_names}
 
         logger.info(
             f"SO101MujocoRobot initialized: "
@@ -111,7 +111,7 @@ class SO101MujocoRobot(Robot):
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
         """Define observation structure for dataset creation."""
-        return {
+        features = {
             # Joint positions
             "shoulder_pan.pos": float,
             "shoulder_lift.pos": float,
@@ -130,9 +130,11 @@ class SO101MujocoRobot(Robot):
             "ee.pos_x": float,
             "ee.pos_y": float,
             "ee.pos_z": float,
-            # Camera
-            "camera_front": (self.config.camera_height, self.config.camera_width, 3),
         }
+        # Add cameras
+        for cam_name in self.config.camera_names:
+            features[f"camera_{cam_name}"] = (self.config.camera_height, self.config.camera_width, 3)
+        return features
 
     @cached_property
     def action_features(self) -> dict[str, type]:
@@ -168,12 +170,13 @@ class SO101MujocoRobot(Robot):
         # Override physics timestep
         self.model.opt.timestep = self.physics_dt
 
-        # Setup renderer for camera
-        self._renderer = mj.Renderer(
-            self.model,
-            height=self.config.camera_height,
-            width=self.config.camera_width
-        )
+        # Setup renderers for each camera
+        for cam_name in self.config.camera_names:
+            self._renderers[cam_name] = mj.Renderer(
+                self.model,
+                height=self.config.camera_height,
+                width=self.config.camera_width
+            )
 
         # Map joint/actuator/site IDs
         self._setup_ids()
@@ -357,25 +360,28 @@ class SO101MujocoRobot(Robot):
         obs["ee.pos_y"] = float(ee_pos[1])
         obs["ee.pos_z"] = float(ee_pos[2])
 
-        # Render camera
-        obs["camera_front"] = self._render_camera()
+        # Render all cameras
+        for cam_name in self.config.camera_names:
+            obs[f"camera_{cam_name}"] = self._render_camera(cam_name)
 
         return obs
 
-    def _render_camera(self) -> np.ndarray:
+    def _render_camera(self, camera_name: str) -> np.ndarray:
         """Render camera view."""
-        # If renderer was closed (e.g., for GLFW compatibility), return dummy image
-        if self._renderer is None:
+        # If renderer doesn't exist, return dummy image
+        if camera_name not in self._renderers:
             return np.zeros(
                 (self.config.camera_height, self.config.camera_width, 3),
                 dtype=np.uint8
             )
 
+        renderer = self._renderers[camera_name]
+
         # Update scene
-        self._renderer.update_scene(self.data, camera=self.config.camera_name)
+        renderer.update_scene(self.data, camera=camera_name)
 
         # Render
-        pixels = self._renderer.render()
+        pixels = renderer.render()
 
         # Convert to uint8 RGB
         return pixels.astype(np.uint8)
@@ -607,6 +613,61 @@ class SO101MujocoRobot(Robot):
 
         return dq
 
+    def reset_block_position(self, x_range: tuple[float, float] = (0.18, 0.26),
+                            y_range: tuple[float, float] = (-0.08, 0.08)) -> None:
+        """
+        Randomize block position within specified ranges.
+
+        Args:
+            x_range: (min_x, max_x) in meters, default (0.18, 0.26) - reachable workspace
+            y_range: (min_y, max_y) in meters, default (-0.08, 0.08) - left/right of center
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected")
+
+        # Find block body ID
+        block_body_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "block")
+        if block_body_id < 0:
+            logger.warning("Block body not found in model - skipping reset")
+            return
+
+        # Get qpos address for block's freejoint (7 DOF: 3 pos + 4 quat)
+        block_jnt_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_JOINT, "block")
+        block_qpos_adr = self.model.jnt_qposadr[block_jnt_id]
+
+        # Randomize position
+        x = np.random.uniform(x_range[0], x_range[1])
+        y = np.random.uniform(y_range[0], y_range[1])
+        z = 0.012  # Cube half-size to sit on floor
+
+        # Set position
+        self.data.qpos[block_qpos_adr:block_qpos_adr + 3] = [x, y, z]
+
+        # Reset orientation to upright (identity quaternion: w=1, x=0, y=0, z=0)
+        self.data.qpos[block_qpos_adr + 3:block_qpos_adr + 7] = [1, 0, 0, 0]
+
+        # Get qvel address and reset velocities
+        block_qvel_adr = self.model.jnt_dofadr[block_jnt_id]
+        self.data.qvel[block_qvel_adr:block_qvel_adr + 6] = 0.0
+
+        # Forward to update derived quantities
+        mj.mj_forward(self.model, self.data)
+
+        logger.info(f"Block reset to position: [{x:.3f}, {y:.3f}, {z:.3f}]")
+
+    def get_block_position(self) -> tuple[float, float, float] | None:
+        """Get current block position for episode metadata."""
+        if not self.is_connected:
+            return None
+
+        block_jnt_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_JOINT, "block")
+        if block_jnt_id < 0:
+            return None
+
+        block_qpos_adr = self.model.jnt_qposadr[block_jnt_id]
+        pos = self.data.qpos[block_qpos_adr:block_qpos_adr + 3]
+        return (float(pos[0]), float(pos[1]), float(pos[2]))
+
     def disconnect(self) -> None:
         """Close MuJoCo model and renderer."""
         if not self.is_connected:
@@ -630,13 +691,13 @@ class SO101MujocoRobot(Robot):
             finally:
                 self._viewer = None
 
-        if self._renderer is not None:
+        # Close all renderers
+        for cam_name, renderer in self._renderers.items():
             try:
-                self._renderer.close()
+                renderer.close()
             except Exception as e:
-                logger.warning(f"Error closing renderer: {e}")
-            finally:
-                self._renderer = None
+                logger.warning(f"Error closing renderer for {cam_name}: {e}")
+        self._renderers.clear()
 
         self.model = None
         self.data = None
