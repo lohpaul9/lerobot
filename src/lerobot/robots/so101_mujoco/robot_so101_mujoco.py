@@ -90,6 +90,7 @@ class SO101MujocoRobot(Robot):
             "vy": 0.0,
             "vz": 0.0,
             "yaw_rate": 0.0,
+            "wrist_flex_rate": 0.0,
             "gripper_delta": 0.0,
         }
 
@@ -453,6 +454,7 @@ class SO101MujocoRobot(Robot):
         - W/S: +Y / -Y (world frame, forward/backward)
         - A/D: -X / +X (world frame, left/right)
         - Q/E: +Z / -Z (up/down)
+        - I/K: Wrist flex up/down
         - [ / ]: Wrist roll left/right
         - O / C: Gripper open/close
         """
@@ -468,6 +470,10 @@ class SO101MujocoRobot(Robot):
         vz = self.config.lin_speed if keyboard_action.get("q") else 0.0
         vz -= self.config.lin_speed if keyboard_action.get("e") else 0.0
 
+        # I/K for wrist flex (up/down)
+        wrist_flex_rate = -self.config.yaw_speed if keyboard_action.get("i") else 0.0
+        wrist_flex_rate += self.config.yaw_speed if keyboard_action.get("k") else 0.0
+
         # [ / ] for wrist roll
         yaw_rate = -self.config.yaw_speed if keyboard_action.get("[") else 0.0
         yaw_rate += self.config.yaw_speed if keyboard_action.get("]") else 0.0
@@ -482,6 +488,7 @@ class SO101MujocoRobot(Robot):
             "vy": vy,
             "vz": vz,
             "yaw_rate": yaw_rate,
+            "wrist_flex_rate": wrist_flex_rate,
             "gripper_delta": gripper_delta,
         }
 
@@ -521,7 +528,7 @@ class SO101MujocoRobot(Robot):
         """
         Velocity-based control for teleoperation.
 
-        Action dict contains velocity keys: 'vx', 'vy', 'vz', 'yaw_rate', 'gripper_delta'
+        Action dict contains velocity keys: 'vx', 'vy', 'vz', 'yaw_rate', 'wrist_flex_rate', 'gripper_delta'
         Runs high-frequency control loop with Jacobian/IK computation.
 
         Returns the final joint position targets (for recording).
@@ -533,17 +540,19 @@ class SO101MujocoRobot(Robot):
             vy = action.get("vy", 0.0)
             vz = action.get("vz", 0.0)
             yaw_rate = action.get("yaw_rate", 0.0)
+            wrist_flex_rate = action.get("wrist_flex_rate", 0.0)
             gripper_delta = action.get("gripper_delta", 0.0)
         else:
             # Fallback to stored velocities for test scripts
             vel = self._keyboard_velocities
             vx, vy, vz = vel["vx"], vel["vy"], vel["vz"]
             yaw_rate = vel["yaw_rate"]
+            wrist_flex_rate = vel["wrist_flex_rate"]
             gripper_delta = vel["gripper_delta"]
 
         # Run high-frequency control loop (orient_down.py logic)
         for _ in range(self.n_control_per_record):
-            self._control_step(vx, vy, vz, yaw_rate, gripper_delta)
+            self._control_step(vx, vy, vz, yaw_rate, wrist_flex_rate, gripper_delta)
 
         # Render GLFW visualization once per action (30Hz) instead of per control step (180Hz)
         self._render_glfw()
@@ -586,14 +595,14 @@ class SO101MujocoRobot(Robot):
         # Return commanded action
         return action.copy()
 
-    def _control_step(self, vx: float, vy: float, vz: float, yaw_rate: float, gripper_delta: float):
+    def _control_step(self, vx: float, vy: float, vz: float, yaw_rate: float, wrist_flex_rate: float, gripper_delta: float):
         """
-        Single control iteration (orient_down.py logic).
+        Single control iteration with manual wrist control.
 
         This runs at control_fps (180 Hz) and:
         1. Computes Jacobian at current configuration
         2. Solves for joint velocities to achieve XYZ velocity
-        3. Adds wrist tilt correction for vertical orientation
+        3. Adds manual wrist flex control (user-controlled)
         4. Applies gravity compensation
         5. Rate limits and smooths
         6. Integrates to get position targets
@@ -620,15 +629,11 @@ class SO101MujocoRobot(Robot):
         dq = np.zeros(self.model.nv)
         dq[arm_cols] = dq3
 
-        # --- SECONDARY: Wrist tilt correction for vertical orientation ---
-        dq = self._add_wrist_tilt_correction(dq, Jr, J3, vx, vy, vz)
+        # --- MANUAL: Wrist flex control (user-controlled via I/K keys) ---
+        dq[self.dof_ids["wrist_flex"]] = wrist_flex_rate
 
         # --- Independent wrist roll ---
         dq[self.dof_ids["wrist_roll"]] += yaw_rate
-
-        # --- Gravity compensation for wrist flex ---
-        tau_g = self.data.qfrc_bias[self.dof_ids["wrist_flex"]]
-        dq[self.dof_ids["wrist_flex"]] += self.config.wrist_gff_gain * tau_g
 
         # --- Rate limiting ---
         dq_lim = self.config.vel_limit * np.ones(self.model.nv)
@@ -671,66 +676,6 @@ class SO101MujocoRobot(Robot):
         # --- Step physics multiple times ---
         for _ in range(self.n_physics_per_control):
             mj.mj_step(self.model, self.data)
-
-    def _add_wrist_tilt_correction(
-        self, dq: np.ndarray, Jr: np.ndarray, J3: np.ndarray, vx: float, vy: float, vz: float
-    ) -> np.ndarray:
-        """
-        Add wrist-flex correction to maintain vertical tool orientation.
-
-        From orient_down.py lines 200-246.
-        """
-        # Get current orientation
-        R = self.data.site_xmat[self.ee_site_id].reshape(3, 3)
-        tool_axis = np.array(self.config.tool_axis_site)
-        a_tool = R @ tool_axis
-
-        # Error vector (cross product with desired -Z direction)
-        e = np.cross(a_tool, np.array([0, 0, -1.0]))
-        err_xy = e[:2]
-        err_mag = float(np.linalg.norm(err_xy))
-
-        # Jacobian column for wrist_flex
-        wf_dof = self.dof_ids["wrist_flex"]
-        jcol = Jr[:2, wf_dof]
-        jnorm2 = float(jcol.T @ jcol)
-
-        # Fade tilt control near singularities
-        s = np.linalg.svd(J3, compute_uv=False)
-        smin = float(np.min(s)) if s.size else 0.0
-        sing_scale = np.clip(smin / 0.10, 0.0, 1.0)
-
-        # Fade near joint limits (directional)
-        q = self.data.qpos[wf_dof]
-        lo = self.j_lo[wf_dof]
-        hi = self.j_hi[wf_dof]
-        limit_threshold = 0.1  # radians
-
-        # Compute desired correction
-        moving = (vx != 0.0) or (vy != 0.0) or (vz != 0.0)
-
-        if (moving or err_mag > self.config.tilt_deadzone) and sing_scale > 1e-3 and jnorm2 > 1e-8:
-            w_xy = self.config.ori_gain * sing_scale * err_xy
-            nrm = np.linalg.norm(w_xy)
-            if nrm > self.config.tilt_wmax:
-                w_xy *= self.config.tilt_wmax / (nrm + 1e-9)
-
-            dq_wf = float(jcol.T @ w_xy) / (jnorm2 + self.config.lambda_tilt ** 2)
-
-            # Check if moving toward limit
-            dist_lo = abs(q - lo)
-            dist_hi = abs(hi - q)
-
-            if dist_lo < limit_threshold and dq_wf < 0:
-                lim_scale = dist_lo / limit_threshold
-            elif dist_hi < limit_threshold and dq_wf > 0:
-                lim_scale = dist_hi / limit_threshold
-            else:
-                lim_scale = 1.0
-
-            dq[wf_dof] += lim_scale * dq_wf
-
-        return dq
 
     def reset_to_home_position(self) -> None:
         """
