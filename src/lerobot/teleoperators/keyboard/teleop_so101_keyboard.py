@@ -36,12 +36,14 @@ class SO101KeyboardTeleop(Teleoperator):
     """
     Keyboard teleop for SO-101 that returns raw key states.
 
-    Returns a dict with boolean values for each key (WASD controls to avoid arrow key conflicts):
+    Returns a dict with boolean values for each key:
     {
-        "w": bool, "a": bool, "s": bool, "d": bool,  # Movement
-        "q": bool, "e": bool,  # Wrist roll
-        "r": bool, "f": bool,  # Gripper
-        "shift": bool, "ctrl": bool,  # Up/down
+        "w": bool, "a": bool, "s": bool, "d": bool,  # XY Movement (forward/left/back/right)
+        "q": bool, "e": bool,  # Z Movement (up/down)
+        "i": bool, "k": bool,  # Wrist flex (up/down)
+        "[": bool, "]": bool,  # Wrist roll (left/right)
+        "o": bool, "c": bool,  # Gripper (open/close)
+        "shift": bool, "ctrl": bool,  # Modifier keys
     }
     """
 
@@ -100,7 +102,7 @@ class SO101KeyboardTeleop(Teleoperator):
             logging.info("Using already-active shared keyboard event manager for SO-101 keyboard teleop.")
         
         # Register handlers for all keys we care about
-        for char in ["w", "a", "s", "d", "q", "e", "r", "f", "[", "]", "o", "c"]:
+        for char in ["w", "a", "s", "d", "q", "e", "i", "k", "[", "]", "o", "c"]:
             self.keyboard_manager.register_char_press_handler(
                 char, lambda c=char: self.event_queue.put((c, True))
             )
@@ -151,11 +153,14 @@ class SO101KeyboardTeleop(Teleoperator):
         Get current keyboard state.
 
         Returns:
-            Dict with boolean values for each key (WASD controls):
+            Dict with boolean values for each key:
             {
-                "w": bool, "a": bool, "s": bool, "d": bool,
-                "q": bool, "e": bool, "r": bool, "f": bool,
-                "shift": bool, "ctrl": bool,
+                "w": bool, "a": bool, "s": bool, "d": bool,  # XY movement
+                "q": bool, "e": bool,  # Z movement
+                "i": bool, "k": bool,  # Wrist flex
+                "[": bool, "]": bool,  # Wrist roll
+                "o": bool, "c": bool,  # Gripper
+                "shift": bool, "ctrl": bool,  # Modifiers
             }
         """
         if not self.is_connected:
@@ -173,8 +178,8 @@ class SO101KeyboardTeleop(Teleoperator):
             "d": self.current_pressed.get("d", False),
             "q": self.current_pressed.get("q", False),
             "e": self.current_pressed.get("e", False),
-            "r": self.current_pressed.get("r", False),
-            "f": self.current_pressed.get("f", False),
+            "i": self.current_pressed.get("i", False),
+            "k": self.current_pressed.get("k", False),
             "[": self.current_pressed.get("[", False),
             "]": self.current_pressed.get("]", False),
             "o": self.current_pressed.get("o", False),

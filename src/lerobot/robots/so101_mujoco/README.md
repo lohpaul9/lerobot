@@ -4,20 +4,20 @@ MuJoCo simulation of the SO-101 5-DOF robot arm with keyboard teleoperation for 
 
 ## Overview
 
-This robot implementation enables intuitive keyboard teleoperation of the SO-101 arm in MuJoCo simulation, producing high-quality demonstration datasets compatible with LeRobot's behavior cloning pipeline. The system handles the unique challenges of a 5-DOF robot by making the end-effector always point downward and providing intuitive Cartesian control.
+This robot implementation enables intuitive keyboard teleoperation of the SO-101 arm in MuJoCo simulation, producing high-quality demonstration datasets compatible with LeRobot's behavior cloning pipeline. The system provides Cartesian XYZ control via Jacobian with manual wrist orientation control.
 
 ## Design Philosophy
 
-### Why Point the Tool Down?
+### Manual Wrist Control
 
 The SO-101 has only 5 DOF (pan, lift, elbow, wrist_flex, wrist_roll), which is insufficient for arbitrary 6-DOF end-effector control. Our solution:
 
-1. **Constrain orientation**: Tool always points downward (toward -Z)
-2. **Free up DOF**: This reduces the problem to 4 DOF (3 for XYZ position + 1 for wrist roll)
+1. **XYZ control**: First 3 joints (pan, lift, elbow) control end-effector position via Jacobian
+2. **Manual orientation**: Wrist flex and wrist roll are directly controlled by the user (I/K and [/] keys)
 3. **Intuitive control**: Users control the wrist center point, not the gripper fingers
-4. **Vertical maintenance**: Wrist_flex actively corrects tilt errors to keep tool vertical
+4. **Full workspace access**: Manual wrist control allows reaching different heights and angles
 
-This design makes teleoperation feel natural despite the kinematic limitations.
+This design provides maximum flexibility while keeping teleoperation intuitive.
 
 ### End-Effector Placement
 
@@ -30,19 +30,21 @@ The end-effector is placed at the **wrist center** (`wrist_site`), not at the gr
 
 ## Keyboard Controls
 
-The control scheme maps directly to Cartesian space:
+The control scheme provides intuitive Cartesian control with manual wrist orientation:
 
 | Key | Action | Frame |
 |-----|--------|-------|
 | **W/S** | Forward/Backward | +Y / -Y (world) |
 | **A/D** | Left/Right | -X / +X (world) |
 | **Q/E** | Up/Down | +Z / -Z (world) |
+| **I/K** | Wrist flex up/down | Manual orientation |
 | **[/]** | Wrist roll | CCW / CW |
 | **O/C** | Gripper | Open / Close |
 
 **Design rationale**:
 - WASD cluster for horizontal motion (familiar from gaming)
 - QE for vertical (right hand can reach while left hand does WASD)
+- IK for wrist flex (natural up/down position on keyboard)
 - Brackets for wrist roll (pinky reach)
 - OC for gripper (mnemonic: Open/Close)
 
@@ -83,9 +85,8 @@ send_action(velocities) {
     for i in 0..5:  // 6 iterations = 180 Hz control
         _control_step(velocities) {
             - Compute Jacobian
-            - Solve for joint velocities
-            - Add wrist tilt correction
-            - Apply gravity compensation
+            - Solve for joint velocities (XYZ via pan/lift/elbow)
+            - Add manual wrist flex velocity
             - Rate limit and smooth
             - Step physics 2 times (360 Hz)
         }
@@ -98,14 +99,15 @@ send_action(velocities) {
 ### Action Recording Nuances
 
 **During recording (teleop mode)**:
-- Input: `{vx, vy, vz, yaw_rate, gripper_delta}` (velocities)
+- Input: `{vx, vy, vz, wrist_flex_rate, yaw_rate, gripper_delta}` (velocities)
 - Process: Run 6 control iterations @ 180 Hz
 - Output: `{shoulder_pan.pos, ..., gripper.pos}` (joint positions)
 
 The recorded actions are **desired joint positions** (`q_des`), computed via:
-1. Jacobian maps velocities → joint velocities
-2. Integration accumulates to position targets
-3. Gripper uses rate control: `q_gripper += gripper_delta * dt`
+1. Jacobian maps XYZ velocities → joint velocities (pan, lift, elbow)
+2. Manual wrist velocities added directly (wrist_flex, wrist_roll)
+3. Integration accumulates to position targets
+4. Gripper uses rate control: `q_gripper += gripper_delta * dt`
 
 **Important**: The gripper position must be synced from `data.ctrl` to `q_des` after rate control (in `robot_so101_mujoco.py`) to ensure it gets recorded correctly.
 
@@ -115,11 +117,11 @@ The system supports two distinct action modes, auto-detected based on dict keys:
 
 ### Recording Mode (Velocity → Position)
 
-**Input**: `{vx, vy, vz, yaw_rate, gripper_delta}`
+**Input**: `{vx, vy, vz, wrist_flex_rate, yaw_rate, gripper_delta}`
 
 **Process**:
 1. Run 6 control iterations @ 180 Hz
-2. Each iteration: Jacobian → joint velocities → integrate → position targets
+2. Each iteration: Jacobian → joint velocities (arm) + manual wrist velocities → integrate → position targets
 3. Physics runs at 360 Hz (2 steps per control iteration)
 
 **Output**: `{shoulder_pan.pos, ..., gripper.pos}` → Saved to dataset
@@ -139,8 +141,8 @@ The system supports two distinct action modes, auto-detected based on dict keys:
 
 **Recording** needs high-frequency control because:
 - Velocities must be converted to positions via numerical integration
-- Orientation correction requires feedback (current orientation → correction torque)
-- Gravity compensation adapts to configuration
+- Jacobian computation requires current configuration
+- Smoothing and rate limiting work better at higher frequencies
 - This is computationally intensive (Jacobian at 180 Hz)
 
 **Replay** is simpler because:
@@ -167,31 +169,19 @@ dq = J3.T @ solve(J3@J3.T + λ²I, v_des)  # Damped least-squares
 
 This is the **primary task**: achieve desired XYZ velocity.
 
-### Wrist Tilt Correction (Secondary Task)
+### Manual Wrist Control
 
-The wrist_flex joint actively maintains vertical orientation:
-
-```python
-tool_axis = R @ [0, -1, 0]  # Current tool direction (wrist frame)
-error = cross(tool_axis, [0, 0, -1])  # Error from vertical
-w_xy = k_ori * error[:2]  # Correction angular velocity (XY only)
-dq_wrist_flex = J_rotation[:2, wrist_flex].T @ w_xy
-```
-
-This correction:
-- Runs in the null-space of the primary task (doesn't interfere with XYZ)
-- Fades near singularities (when Jacobian conditioning is poor)
-- Fades near joint limits (directional - only when moving toward limit)
-- Has a deadzone to avoid jitter
-
-### Gravity Compensation
-
-The wrist joint fights gravity. We add feedforward to reduce droop:
+The wrist joints are controlled directly by the user:
 
 ```python
-tau_gravity = data.qfrc_bias[wrist_flex]  # Gravity torque
-dq_wrist_flex += k_gff * tau_gravity
+# Wrist flex - manual velocity from I/K keys
+dq[wrist_flex] = wrist_flex_rate
+
+# Wrist roll - manual velocity from [/] keys
+dq[wrist_roll] = yaw_rate
 ```
+
+These velocities are integrated to position targets, just like the arm joints. The PD controller in MuJoCo tracks these targets, providing stable position holding when no keys are pressed.
 
 ### Gripper Control
 
@@ -227,14 +217,11 @@ Key parameters in `SO101MujocoConfig`:
 | `lin_speed` | 0.04 m/s | XYZ velocity per key press |
 | `yaw_speed` | 1.20 rad/s | Wrist roll rate |
 | `grip_speed` | 0.7 rad/s | Gripper rate |
-| `ori_gain` | 6.0 | Tilt correction strength |
 | `lambda_pos` | 0.01 | Jacobian damping for XYZ |
-| `lambda_tilt` | 0.0001 | Jacobian damping for tilt |
 | `vel_limit` | 0.5 rad/s | Joint velocity limit (arm) |
 | `vel_limit_wrist` | 8.0 rad/s | Joint velocity limit (wrist) |
 | `smooth_dq` | 0.30 | Velocity smoothing (arm) |
 | `smooth_dq_wrist` | 0.08 | Velocity smoothing (wrist) |
-| `wrist_gff_gain` | 0.5 | Gravity feedforward gain |
 
 ## Files
 
@@ -267,18 +254,18 @@ Observations are captured at 30 Hz (once per `get_observation()` call). The inte
 The original `orient_down.py` script runs a continuous loop with GLFW rendering. This implementation adapts it for LeRobot:
 
 **Similarities**:
-- ✅ Identical Jacobian computation
-- ✅ Same tilt correction logic
-- ✅ Same gravity compensation
+- ✅ Identical Jacobian computation for XYZ control
 - ✅ Same rate limiting and smoothing
+- ✅ Same multi-rate architecture
 
 **Differences**:
+- **Manual wrist control**: Wrist flex/roll controlled by user (no automatic orientation correction)
 - **Chunked execution**: Runs 6 control iterations per call (not continuous)
 - **No viewer loop**: GLFW rendering happens separately
 - **Returns actions**: Must return dict for recording
 - **Dual mode**: Supports both velocity (record) and position (replay) actions
 
-The core control quality is preserved - just the execution structure changed.
+This provides greater flexibility and simpler control logic while maintaining smooth teleoperation.
 
 ## Related Documentation
 
