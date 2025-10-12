@@ -616,21 +616,22 @@ class SO101MujocoRobot(Robot):
         Jr = np.zeros((3, self.model.nv))
         mj.mj_jacSite(self.model, self.data, Jp, Jr, self.ee_site_id)
 
-        # --- PRIMARY: XYZ control via (pan, lift, elbow) ---
+        # --- PRIMARY: XYZ control via (pan, lift, elbow, wrist_flex) - 4 DOF for better speed ---
         arm_cols = [
             self.dof_ids["shoulder_pan"],
             self.dof_ids["shoulder_lift"],
-            self.dof_ids["elbow_flex"]
+            self.dof_ids["elbow_flex"],
+            self.dof_ids["wrist_flex"]  # Added for more DOF and faster motion
         ]
-        J3 = Jp[:, arm_cols]
+        J4 = Jp[:, arm_cols]
         v_des = np.array([vx, vy, vz])
-        A = J3 @ J3.T + (self.config.lambda_pos ** 2) * np.eye(3)
-        dq3 = J3.T @ np.linalg.solve(A, v_des)
+        A = J4 @ J4.T + (self.config.lambda_pos ** 2) * np.eye(3)
+        dq4 = J4.T @ np.linalg.solve(A, v_des)
         dq = np.zeros(self.model.nv)
-        dq[arm_cols] = dq3
-
-        # --- MANUAL: Wrist flex control (user-controlled via I/K keys) ---
-        dq[self.dof_ids["wrist_flex"]] = wrist_flex_rate
+        dq[arm_cols] = dq4
+        
+        # Wrist flex now controlled by IK, but add manual control on top
+        dq[self.dof_ids["wrist_flex"]] += wrist_flex_rate
 
         # --- Independent wrist roll ---
         dq[self.dof_ids["wrist_roll"]] += yaw_rate

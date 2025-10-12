@@ -52,9 +52,9 @@ class SO101MujocoConfig(RobotConfig):
     show_collision_geometry: bool = False  # Show collision geometry (convex hulls) in camera renders
 
     # Control parameters (from orient_down.py)
-    lin_speed: float = 0.04         # Linear velocity for XYZ control (m/s)
-    yaw_speed: float = 1.20         # Wrist roll rate (rad/s)
-    grip_speed: float = 0.7         # Gripper speed
+    lin_speed: float = 5.0         # Linear velocity for XYZ control (m/s)
+    yaw_speed: float = 4.0         # Wrist roll rate (rad/s)
+    grip_speed: float = 3.0        # Gripper speed
 
     # Wrist tilt control gains
     ori_gain: float = 6.0           # Orientation correction gain
@@ -66,10 +66,10 @@ class SO101MujocoConfig(RobotConfig):
     lambda_tilt: float = 1.0e-4     # DLS for wrist tilt
 
     # Rate limiting and smoothing
-    vel_limit: float = 0.5          # Joint velocity limit for arm (rad/s)
-    vel_limit_wrist: float = 8.0    # Joint velocity limit for wrist (rad/s)
-    smooth_dq: float = 0.30         # Smoothing factor for arm joints
-    smooth_dq_wrist: float = 0.08   # Smoothing factor for wrist joints
+    vel_limit: float = 6.0          # Joint velocity limit for arm (rad/s)
+    vel_limit_wrist: float = 10.0    # Joint velocity limit for wrist (rad/s)
+    smooth_dq: float = 0.7         # Smoothing factor for arm joints 
+    smooth_dq_wrist: float = 0.4   # Smoothing factor for wrist joints 
 
     # Gravity compensation
     wrist_gff_gain: float = 0.5     # Gravity feedforward gain for wrist
